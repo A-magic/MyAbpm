@@ -1,27 +1,16 @@
-/*
- *******************************************************************************
- *
- * Purpose: Example of using the Arduino MqttClient with Esp8266WiFiClient.
- * Project URL: https://github.com/monstrenyatko/ArduinoMqtt
- *
- *******************************************************************************
- * Copyright Oleg Kovalenko 2017.
- *
- * Distributed under the MIT License.
- * (See accompanying file LICENSE or copy at http://opensource.org/licenses/MIT)
- *******************************************************************************
- */
-
 #include <Arduino.h>
-// #include <ESP8266WiFi.h> //esp8266
 #include <WiFi.h> //esp32
 #include <WiFiClient.h>
-#include <WiFiAP.h>
+#include "HardwareSerial.h"
+#include "BPSensor.h"
+#include "DrawOled.h"
 
 // Enable MqttClient logs
 #define MQTT_LOG_ENABLED 1
 // Include library
 #include <MqttClient.h>
+
+
 
 #define LOG_PRINTFLN(fmt, ...) logfln(fmt, ##__VA_ARGS__)
 #define LOG_SIZE_MAX 128
@@ -35,11 +24,12 @@ void logfln(const char *fmt, ...)
   Serial.println(buf);
 }
 
-#define HW_UART_SPEED 115200L
+#define HW_UART_SPEED 115200L //定义serail波特率，弃用已由heltec直接默认开启
 
-#define SSID "Ho"           //wifi ssid
-#define WIFIPASS "88888888" //wifi password
+char SSID[] = "Ho";           //  your network SSID (name)
+char WIFIPASS[] = "88888888"; // your network password (use for WPA, or use as key for WEP)
 
+int status = WL_IDLE_STATUS;
 //onenet server
 #define MQTT_SERVER "183.230.40.39" //MQTTSERVER IP
 #define MQTT_PORT 6002              //MQTTSERVER PORT
@@ -51,47 +41,52 @@ void logfln(const char *fmt, ...)
 #define MQTT_TOPIC_PUB "$dp"           //MQTT_TOPIC_PUB
 #define MQTT_TOPIC_SUB "/516152057/HP" //MQTT_TOPIC_SUB
 
-// //my amozon server
-// #define MQTT_SERVER "18.223.136.65" //MQTTSERVER IP
-// #define MQTT_PORT 61613             //MQTTSERVER PORT
-
-// #define MQTT_USERNAME "admin"    //productID
-// #define MQTT_PASSWORD "password" //AUTHINFO OR APIKEY
-// #define MQTT_ID "LED"            //DEVICEid
-
-// #define MQTT_TOPIC_PUB "LED" //MQTT_TOPIC_PUB
-// #define MQTT_TOPIC_SUB "LED" //MQTT_TOPIC_SUB
-
-int LED_STATUS = 0;
-
 static MqttClient *mqtt = NULL;
 static WiFiClient network;
 
 // ============== Object to supply system functions ============================
 class System : public MqttClient::System
 {
-public:
-  unsigned long millis() const
-  {
-    return ::millis();
-  }
-
-  void yield(void)
-  {
-    ::yield();
-  }
+  public:
+    unsigned long millis() const
+    {
+      return ::millis();
+    }
+    void yield(void)
+    {
+      ::yield();
+    }
 };
 
 // ============== Setup all objects ============================================
 void setup()
 {
   // Setup hardware serial for logging
-  Serial.begin(HW_UART_SPEED);
-  while (!Serial)
-    ;
+  // Serial.begin(HW_UART_SPEED);
+  Heltec.begin(true /*DisplayEnable Enable*/, false /*LoRa Disable*/, true /*Serial Enable*/); //begin serial 115200
+  Heltec.display->setContrast(255);
+  //血压探测器串口定义
 
-  WiFi.softAP(SSID, WIFIPASS);
-  IPAddress myIP = WiFi.softAPIP();
+  mySerial.begin(115200, SERIAL_8N1, 14, 27); //rx tx
+
+
+  bp_check_order(Readmv); //向血压探测器发送擦除原校准信息命令
+
+
+  while (status != WL_CONNECTED)
+  {
+    Serial.print("Attempting to connect to SSID: ");
+    Serial.println(SSID);
+    // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
+    status = WiFi.begin(SSID, WIFIPASS);
+    Serial.print("status:");
+    Serial.println(status);
+    // wait 10 seconds for connection:
+    delay(5000);
+  }
+  Serial.println("Connected to wifi");
+
+  IPAddress myIP = WiFi.localIP();
   Serial.print("AP IP address: ");
   Serial.println(myIP);
 
@@ -103,7 +98,7 @@ void setup()
     LOG_PRINTFLN(".");
   }
   LOG_PRINTFLN("Connected to WiFi");
-  LOG_PRINTFLN("IP: %s", WiFi.softAPIP().toString().c_str());
+  LOG_PRINTFLN("IP: %s", myIP);
 
   // Setup MqttClient
   MqttClient::System *mqttSystem = new System;
@@ -121,13 +116,8 @@ void setup()
   mqttOptions.commandTimeoutMs = 10000;
   //// Make client object
   mqtt = new MqttClient(
-      mqttOptions, *mqttLogger, *mqttSystem, *mqttNetwork, *mqttSendBuffer,
-      *mqttRecvBuffer, *mqttMessageHandlers);
-}
-
-int rand_X(int x)
-{
-  return (rand() % x);
+    mqttOptions, *mqttLogger, *mqttSystem, *mqttNetwork, *mqttSendBuffer,
+    *mqttRecvBuffer, *mqttMessageHandlers);
 }
 
 // ============== Subscription callback ========================================
@@ -138,8 +128,8 @@ void processMessage(MqttClient::MessageData &md)
   memcpy(payload, msg.payload, msg.payloadLen);
   payload[msg.payloadLen] = '\0';
   LOG_PRINTFLN(
-      "Message arrived: qos %d, retained %d, dup %d, packetid %d, payload:[%s]",
-      msg.qos, msg.retained, msg.dup, msg.id, payload);
+    "Message arrived: qos %d, retained %d, dup %d, packetid %d, payload:[%s]",
+    msg.qos, msg.retained, msg.dup, msg.id, payload);
 }
 
 // ============== Main loop ====================================================
@@ -173,17 +163,17 @@ void loop()
       MqttClient::Error::type rc = mqtt->connect(options, connectResult);
       if (rc != MqttClient::Error::SUCCESS)
       {
-        LOG_PRINTFLN("Connection error: %i", rc);
+        LOG_PRINTFLN("Connection error: % i", rc);
         return;
       }
     }
     {
       // Add subscribe here if required
       MqttClient::Error::type rc = mqtt->subscribe(
-          (char *)MQTT_TOPIC_SUB, MqttClient::QOS0, processMessage);
+                                     (char *)MQTT_TOPIC_SUB, MqttClient::QOS0, processMessage);
       if (rc != MqttClient::Error::SUCCESS)
       {
-        LOG_PRINTFLN("Subscribe error: %i", rc);
+        LOG_PRINTFLN("Subscribe error: % i", rc);
         LOG_PRINTFLN("Drop connection");
         mqtt->disconnect();
         return;
@@ -195,14 +185,20 @@ void loop()
     {
       // Add publish here if required
 
-      char json[] = "{\"datastreams\":[{\"id\":\"HP\",\"datapoints\":[{\"value\":%d}]},{\"id\":\"LP\",\"datapoints\":[{\"value\":%d}]}]}";
+      char json[] = " {\"HP\":\"%d\",\"LP\":\"%d\",\"HR\":\"%d\"}";
       char t_json[255];
       int payload_len;
       char *t_payload;
       unsigned short json_len;
 
-      // sprintf(t_json, json, li_hp, li_lp, li_hr);
-      sprintf(t_json, json, rand_X(120), rand_X(80));
+      bp_check_order(readco);
+      sprintf(t_json, json, int(SensorData[1]), int(SensorData[2]), int(SensorData[3]));
+      
+      drawFontFaceDemo(int(SensorData[1]), int(SensorData[2]), int(SensorData[3]));
+      Serial.println(t_json);
+
+
+
       payload_len = 1 + 2 + strlen(t_json) / sizeof(char);
       json_len = strlen(t_json) / sizeof(char);
 
@@ -210,16 +206,12 @@ void loop()
       if (t_payload == NULL)
       {
         printf("<%s>: t_payload malloc error\r\n", __FUNCTION__);
-        // return 0;
       }
-
       //type
-      t_payload[0] = '\x01';
-
+      t_payload[0] = '\x03';
       //length
       t_payload[1] = (json_len & 0xFF00) >> 8;
       t_payload[2] = json_len & 0xFF;
-
       //json
       memcpy(t_payload + 3, t_json, json_len);
 
@@ -227,9 +219,7 @@ void loop()
       message.qos = MqttClient::QOS0;
       message.retained = false;
       message.dup = false;
-
       message.payload = (void *)t_payload;
-
       message.payloadLen = payload_len;
       mqtt->publish((char *)MQTT_TOPIC_PUB, message);
     }
